@@ -1,0 +1,16 @@
+# Build output
+router-test
+/bin/
+
+# Go
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Secrets
+.env
+.env.*

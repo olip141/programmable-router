@@ -1,0 +1,28 @@
+# Project Context: Programmable Edge Router (nDPI + Go)
+
+## Core Objective
+Development of a programmable edge router capable of Deep Packet Inspection (DPI) and QoS traffic control. The core logic is written in Go, utilizing the nDPI library (written in C) for L7 traffic analysis and libpcap for packet capturing. This is an engineering thesis project.
+
+## Environments & Infrastructure
+1. **Development Environment (Current Machine):**
+   - **Platform:** Google Cloud Platform (GCP) `e2-micro` (Always Free).
+   - **OS:** Debian 12.
+   - **Resources:** 1 GB physical RAM + 4 GB Swap file (critical for preventing OOM killer during C/CGO compilation).
+   - **Role:** Exclusively for writing code, downloading packages, and compiling (`go build`, `make`).
+   - **Access:** IDE Cursor connected via SSH.
+
+2. **Testing/Target Environment:**
+   - **Platform:** GNS3 Virtual Router (Debian emulated via TCG) / target physical hardware (Raspberry Pi).
+   - **Limitations:** Extremely constrained resources (emulated CPU, low RAM).
+   - **Role:** Execution only. Absolutely NO compilation happens here.
+
+## Engineering Workflow
+- Code is developed and compiled on the GCP Development Environment.
+- The resulting lightweight Go binary is transferred to the GNS3 Testing Environment for execution and network testing.
+- AI Assistant should ALWAYS assume the code is being written on the GCP machine, NOT the GNS3 router.
+
+## Tech Stack & Dependencies
+- **Primary Language:** Go (Golang).
+- **Packet Inspection:** nDPI (ntop/nDPI).
+- **Packet Capturing:** libpcap (`libpcap-dev`).
+- **Interoperability:** CGO (required to bind Go with nDPI and libpcap).

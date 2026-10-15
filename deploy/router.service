@@ -1,0 +1,15 @@
+[Unit]
+Description=Programmable edge router (nDPI + nftables policy)
+After=network-online.target nftables.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/router -i eth1 -f "not port 22" -c /etc/edge-router/router.yaml -v
+Restart=on-failure
+AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

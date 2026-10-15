@@ -1,0 +1,26 @@
+# Example policy for edge-router (GNS3 forward path).
+nftables:
+  table: dpi
+  hooks: [forward]
+  drop_mark: 0xdead
+  element_timeout: 300s
+
+rules:
+  - name: block-torrent
+    match: { protocol: BitTorrent }
+    action: drop
+
+  - name: video-low-prio
+    match: { category: Media }
+    action: mark
+    mark: 0x10
+
+  - name: ssh-high-prio
+    match: { master: SSH }
+    action: mark
+    mark: 0x20
+
+  - name: youtube-alt-wan
+    match: { app: YouTube }
+    action: mark
+    mark: 0x30

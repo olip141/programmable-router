@@ -117,6 +117,10 @@ func (t *Table) finish(f *Flow, giveUp bool) {
 		f.Result = t.eng.GiveUp(f.state)
 		f.GaveUp = true
 	}
+	f.Master = t.eng.ProtoName(f.Result.Master)
+	if f.Result.App != 0 {
+		f.App = t.eng.ProtoName(f.Result.App)
+	}
 	f.Protocol = t.eng.ProtocolName(f.Result)
 	f.Category = t.eng.CategoryName(f.Result)
 	f.Done = true

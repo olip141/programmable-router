@@ -58,12 +58,36 @@ static char *router_proto_name(struct ndpi_detection_module_struct *mod,
 	p.app_protocol = app;
 	return ndpi_protocol2name(mod, p, buf, len);
 }
+
+static char *router_get_proto_name(struct ndpi_detection_module_struct *mod, u_int16_t id) {
+	return ndpi_get_proto_name(mod, id);
+}
+
+static u_int16_t router_get_proto_by_name(struct ndpi_detection_module_struct *mod, const char *name) {
+	return ndpi_get_proto_by_name(mod, name);
+}
+
+static router_result router_lookup_protocol(struct ndpi_detection_module_struct *mod, const char *name) {
+	ndpi_master_app_protocol p = ndpi_get_protocol_by_name(mod, name);
+	router_result r;
+	r.master = p.master_protocol;
+	r.app = p.app_protocol;
+	r.category = 0;
+	r.state = 0;
+	return r;
+}
+
+static int router_category_id(struct ndpi_detection_module_struct *mod, const char *name) {
+	return ndpi_get_category_id(mod, (char *)name);
+}
 */
 import "C"
 
 import (
 	"errors"
 	"fmt"
+	"sort"
+	"strings"
 	"unsafe"
 )
 
@@ -229,4 +253,84 @@ func Revision() string {
 // APIVersion returns the nDPI API version number.
 func APIVersion() uint16 {
 	return uint16(C.ndpi_get_api_version())
+}
+
+// ProtoName returns the nDPI name for a single protocol id (master or app).
+func (e *Engine) ProtoName(id uint16) string {
+	if e.mod == nil || id == C.NDPI_PROTOCOL_UNKNOWN {
+		return ""
+	}
+	p := C.router_get_proto_name(e.mod, C.u_int16_t(id))
+	if p == nil {
+		return ""
+	}
+	return C.GoString(p)
+}
+
+// ProtoByName resolves a master or app protocol name to its id.
+func (e *Engine) ProtoByName(name string) (uint16, bool) {
+	if e.mod == nil || name == "" {
+		return 0, false
+	}
+	cname := C.CString(name)
+	defer C.free(unsafe.Pointer(cname))
+	id := C.router_get_proto_by_name(e.mod, cname)
+	if id == C.NDPI_PROTOCOL_UNKNOWN {
+		return 0, false
+	}
+	return uint16(id), true
+}
+
+// LookupProtocol resolves a combined name such as "TLS.YouTube".
+func (e *Engine) LookupProtocol(name string) (Result, bool) {
+	if e.mod == nil || name == "" {
+		return Result{}, false
+	}
+	cname := C.CString(name)
+	defer C.free(unsafe.Pointer(cname))
+	r := C.router_lookup_protocol(e.mod, cname)
+	res := newResult(r)
+	if res.Master == C.NDPI_PROTOCOL_UNKNOWN && res.App == C.NDPI_PROTOCOL_UNKNOWN {
+		return Result{}, false
+	}
+	return res, true
+}
+
+// CategoryID resolves a category name to its nDPI id, or false if unknown.
+func (e *Engine) CategoryID(name string) (uint16, bool) {
+	if e.mod == nil || name == "" {
+		return 0, false
+	}
+	cname := C.CString(name)
+	defer C.free(unsafe.Pointer(cname))
+	id := C.router_category_id(e.mod, cname)
+	if id < 0 {
+		return 0, false
+	}
+	return uint16(id), true
+}
+
+// Categories returns sorted unique category names known to nDPI.
+func (e *Engine) Categories() []string {
+	if e.mod == nil {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	n := int(C.NDPI_PROTOCOL_NUM_CATEGORIES)
+	for i := 0; i < n; i++ {
+		p := C.ndpi_category_get_name(e.mod, C.ndpi_protocol_category_t(i))
+		if p == nil {
+			continue
+		}
+		name := strings.TrimSpace(C.GoString(p))
+		if name != "" {
+			seen[name] = struct{}{}
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for name := range seen {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
 }

@@ -74,7 +74,9 @@ type Flow struct {
 
 	// Result and Protocol are final once Done is set.
 	Result   dpi.Result
-	Protocol string
+	Master   string // nDPI master protocol name, e.g. "TLS"
+	App      string // nDPI app protocol name, e.g. "Google"
+	Protocol string // combined name, e.g. "TLS.Google"
 	Category string
 	// Done means nDPI inspection has finished for this flow.
 	Done bool

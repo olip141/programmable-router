@@ -3,6 +3,7 @@ package policy
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -52,6 +53,34 @@ func LoadBytes(data []byte) (*Config, error) {
 		return nil, err
 	}
 	return &cfg, nil
+}
+
+// Marshal serialises the config as YAML.
+func (c *Config) Marshal() ([]byte, error) {
+	return yaml.Marshal(c)
+}
+
+// SaveFile writes cfg to path atomically (temp file in the same directory, then rename).
+func SaveFile(path string, cfg *Config) error {
+	data, err := cfg.Marshal()
+	if err != nil {
+		return err
+	}
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".router-policy-*.yaml")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer func() { _ = os.Remove(tmpName) }()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, path)
 }
 
 // LoadFile reads and normalises a policy file.
@@ -115,6 +144,16 @@ func (c *Config) normalize() error {
 		}
 	}
 	return nil
+}
+
+// WithRules returns a copy of c with rules replaced and normalised.
+func (c *Config) WithRules(rules []Rule) (*Config, error) {
+	out := *c
+	out.Rules = rules
+	if err := out.normalize(); err != nil {
+		return nil, err
+	}
+	return &out, nil
 }
 
 // Validate checks protocol and category names against nDPI.

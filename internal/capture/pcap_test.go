@@ -105,7 +105,7 @@ func runPcap(t *testing.T, name string) map[flow.Key]string {
 		last = p.Timestamp
 		table.Expire(p.Timestamp)
 		table.Handle(p)
-	}); err != nil {
+	}, nil); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 

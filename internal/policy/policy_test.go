@@ -72,6 +72,34 @@ rules:
 	}
 }
 
+func TestSaveFileRoundTrip(t *testing.T) {
+	cfg, err := policy.LoadBytes([]byte(`
+nftables:
+  table: dpi
+  drop_mark: 0xdead
+rules:
+  - name: ssh-mark
+    match: { master: SSH }
+    action: mark
+    mark: 0x20
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	path := dir + "/policy.yaml"
+	if err := policy.SaveFile(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := policy.LoadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded.Rules) != 1 || loaded.Rules[0].Name != "ssh-mark" {
+		t.Fatalf("loaded: %+v", loaded.Rules)
+	}
+}
+
 func TestValidateProtocols(t *testing.T) {
 	eng, err := dpi.New()
 	if err != nil {

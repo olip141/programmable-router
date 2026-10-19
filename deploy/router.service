@@ -5,7 +5,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/router -i eth1 -f "not port 22" -c /etc/edge-router/router.yaml -v
+ExecStart=/usr/local/bin/router -i eth1 -f "not port 22" -c /etc/edge-router/router.yaml -v -http 127.0.0.1:8080 -http-pass-file /etc/edge-router/http-pass
 Restart=on-failure
 AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN
 CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN

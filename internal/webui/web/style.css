@@ -1,0 +1,75 @@
+:root {
+  --bg: #0f1419;
+  --panel: #1a2332;
+  --text: #e7ecf3;
+  --muted: #8b9cb3;
+  --accent: #3d8bfd;
+  --border: #2a3548;
+  --warn: #f0ad4e;
+}
+* { box-sizing: border-box; }
+body {
+  font-family: system-ui, -apple-system, Segoe UI, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  margin: 0;
+  padding: 1rem 1.5rem 2rem;
+  line-height: 1.45;
+}
+header h1 { margin: 0; font-size: 1.35rem; }
+.subtitle { color: var(--muted); margin: 0.25rem 0 1rem; font-size: 0.9rem; }
+.tabs { display: flex; gap: 0.5rem; margin-bottom: 1rem; }
+.tab {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 0.45rem 0.9rem;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.tab.active { border-color: var(--accent); color: var(--accent); }
+.panel { display: none; }
+.panel.active { display: block; }
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 0.75rem; margin-bottom: 1.25rem; }
+.card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.75rem 1rem;
+}
+.card .label { font-size: 0.75rem; color: var(--muted); text-transform: uppercase; }
+.card .value { font-size: 1.25rem; font-weight: 600; }
+table { width: 100%; border-collapse: collapse; font-size: 0.88rem; margin-bottom: 1rem; }
+th, td { border-bottom: 1px solid var(--border); padding: 0.4rem 0.5rem; text-align: left; }
+th { color: var(--muted); font-weight: 500; }
+.note { color: var(--muted); font-size: 0.85rem; }
+.warn { color: var(--warn); }
+.hidden { display: none; }
+.actions { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-top: 1rem; }
+button {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 0.45rem 0.85rem;
+  border-radius: 6px;
+  cursor: pointer;
+}
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+.rule-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr auto auto auto;
+  gap: 0.4rem;
+  margin-bottom: 0.5rem;
+  align-items: center;
+}
+.rule-row input, .rule-row select {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 0.35rem 0.5rem;
+  border-radius: 4px;
+  width: 100%;
+}
+.nft-readonly { font-size: 0.85rem; color: var(--muted); margin-bottom: 1rem; }
+#flow-filter { width: 100%; max-width: 320px; margin-bottom: 0.75rem; padding: 0.4rem; background: var(--panel); border: 1px solid var(--border); color: var(--text); border-radius: 4px; }

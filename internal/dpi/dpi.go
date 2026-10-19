@@ -80,6 +80,10 @@ static router_result router_lookup_protocol(struct ndpi_detection_module_struct 
 static int router_category_id(struct ndpi_detection_module_struct *mod, const char *name) {
 	return ndpi_get_category_id(mod, (char *)name);
 }
+
+static u_int router_num_protocols(struct ndpi_detection_module_struct *mod) {
+	return ndpi_get_num_protocols(mod);
+}
 */
 import "C"
 
@@ -308,6 +312,31 @@ func (e *Engine) CategoryID(name string) (uint16, bool) {
 		return 0, false
 	}
 	return uint16(id), true
+}
+
+// Protocols returns sorted unique protocol names (master/app ids) known to nDPI.
+func (e *Engine) Protocols() []string {
+	if e.mod == nil {
+		return nil
+	}
+	n := int(C.router_num_protocols(e.mod))
+	seen := make(map[string]struct{})
+	for i := 0; i < n; i++ {
+		p := C.router_get_proto_name(e.mod, C.u_int16_t(i))
+		if p == nil {
+			continue
+		}
+		name := strings.TrimSpace(C.GoString(p))
+		if name != "" && name != "Unknown" {
+			seen[name] = struct{}{}
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for name := range seen {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // Categories returns sorted unique category names known to nDPI.

@@ -180,8 +180,9 @@ func (s *Source) Stats() Stats {
 }
 
 // Run reads packets until ctx is cancelled or the file ends, calling fn for
-// every decoded IP packet. It returns nil on a clean stop.
-func (s *Source) Run(ctx context.Context, fn func(*Packet)) error {
+// every decoded IP packet. When idle is non-nil it is invoked on live read
+// timeouts (no packet within readTimeout) with the current time.
+func (s *Source) Run(ctx context.Context, fn func(*Packet), idle func(time.Time)) error {
 	var stop atomic.Bool
 	defer context.AfterFunc(ctx, func() { stop.Store(true) })()
 
@@ -190,6 +191,9 @@ func (s *Source) Run(ctx context.Context, fn func(*Packet)) error {
 		switch {
 		case err == nil:
 		case errors.Is(err, pcap.NextErrorTimeoutExpired):
+			if idle != nil {
+				idle(time.Now())
+			}
 			continue
 		case errors.Is(err, io.EOF), errors.Is(err, pcap.NextErrorNoMorePackets):
 			return nil

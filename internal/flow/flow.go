@@ -78,6 +78,9 @@ type Flow struct {
 	App      string // nDPI app protocol name, e.g. "Google"
 	Protocol string // combined name, e.g. "TLS.Google"
 	Category string
+	// PolicyRule and PolicyMark are set when a policy rule matched at classification.
+	PolicyRule string
+	PolicyMark uint32
 	// Done means nDPI inspection has finished for this flow.
 	Done bool
 	// GaveUp means the classification comes from ndpi_detection_giveup

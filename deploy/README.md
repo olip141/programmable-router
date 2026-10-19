@@ -32,6 +32,33 @@ sudo sysctl -w net.ipv6.conf.all.forwarding=1
 sudo router -i eth1 -f "not port 22" -c /etc/edge-router/router.yaml -v
 ```
 
+## Admin GUI (L7 policy)
+
+Enable the built-in web UI (static HTML/JS embedded in the binary):
+
+```bash
+# On the router LAN (password required when not on loopback):
+echo 'your-password' | sudo tee /etc/edge-router/http-pass
+sudo chmod 600 /etc/edge-router/http-pass
+sudo router -i eth1 -f "not port 22" -c /etc/edge-router/router.yaml \
+  -http 0.0.0.0:8080 -http-user admin -http-pass-file /etc/edge-router/http-pass
+```
+
+On the GCP dev VM (loopback only, password optional):
+
+```bash
+./bin/router -i ens4 -f "not port 22" -c deploy/router-gcp.yaml -http 127.0.0.1:8080
+```
+
+From your laptop, tunnel to the VM:
+
+```bash
+ssh -L 8080:127.0.0.1:8080 user@gcp-host
+# open http://127.0.0.1:8080/
+```
+
+The GUI provides overview stats, active flows, and live editing of policy rules (`PUT /api/rules`) with optional save to the YAML file (`POST /api/rules/save`). New rules apply to flows classified after the change; existing conntrack marks persist until expiry.
+
 On a host without forwarding (e.g. GCP), use `deploy/router-gcp.yaml` with hooks `[input, output]`.
 
 ## QoS and routing (after policy marks are set)

@@ -65,6 +65,13 @@ func (t *Table) Len() int { return len(t.flows) }
 // Lookup returns the active flow for k, if any.
 func (t *Table) Lookup(k Key) *Flow { return t.flows[k] }
 
+// Range calls fn for each active flow. fn must not retain the Flow pointer.
+func (t *Table) Range(fn func(*Flow)) {
+	for _, f := range t.flows {
+		fn(f)
+	}
+}
+
 // Handle accounts p to its flow and, while inspection is still running,
 // feeds it to nDPI. The returned flow stays valid after p is reused.
 func (t *Table) Handle(p *capture.Packet) *Flow {

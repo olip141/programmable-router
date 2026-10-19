@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Edge Router — polityka L7</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header>
+    <h1>Programowalny router</h1>
+    <p class="subtitle">Polityka L7 · nDPI</p>
+  </header>
+  <nav class="tabs">
+    <button type="button" class="tab active" data-tab="overview">Przegląd</button>
+    <button type="button" class="tab" data-tab="flows">Przepływy</button>
+    <button type="button" class="tab" data-tab="rules">Reguły</button>
+  </nav>
+  <main>
+    <section id="panel-overview" class="panel active">
+      <div class="cards" id="status-cards"></div>
+      <h2>Protokoły</h2>
+      <table id="summary-table"><thead><tr><th>Protokół</th><th>Przepływy</th><th>Pakiety</th><th>Bajty</th></tr></thead><tbody></tbody></table>
+      <h2>Trafienia reguł</h2>
+      <table id="hits-table"><thead><tr><th>Reguła</th><th>Liczba</th></tr></thead><tbody></tbody></table>
+      <p class="note" id="policy-note"></p>
+    </section>
+    <section id="panel-flows" class="panel">
+      <label>Filtr <input type="search" id="flow-filter" placeholder="protokół, IP, reguła…"></label>
+      <table id="flows-table">
+        <thead><tr><th>Przepływ</th><th>Protokół</th><th>Kategoria</th><th>Pakiety</th><th>Bajty</th><th>Reguła</th><th>Mark</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </section>
+    <section id="panel-rules" class="panel">
+      <p id="rules-readonly" class="warn hidden">Tryb tylko do odczytu — uruchom z <code>-c plik.yaml</code>, aby edytować reguły.</p>
+      <div class="nft-readonly" id="nft-info"></div>
+      <div id="rules-editor"></div>
+      <div class="actions">
+        <button type="button" id="btn-add-rule">Dodaj regułę</button>
+        <button type="button" id="btn-apply" class="primary">Zastosuj</button>
+        <button type="button" id="btn-save">Zapisz do pliku</button>
+      </div>
+      <p class="note" id="rules-msg"></p>
+    </section>
+  </main>
+  <script src="/static/app.js"></script>
+</body>
+</html>

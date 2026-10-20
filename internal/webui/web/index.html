@@ -3,18 +3,19 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Edge Router — polityka L7</title>
+  <title>Router - ustawienia L7</title>
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
   <header>
-    <h1>Programowalny router</h1>
-    <p class="subtitle">Polityka L7 · nDPI</p>
+    <h1>Ustawienia L7</h1>
+    <p class="subtitle"></p>
   </header>
   <nav class="tabs">
-    <button type="button" class="tab active" data-tab="overview">Przegląd</button>
+    <button type="button" class="tab active" data-tab="overview">Dashboard</button>
     <button type="button" class="tab" data-tab="flows">Przepływy</button>
     <button type="button" class="tab" data-tab="rules">Reguły</button>
+    <button type="button" class="tab" data-tab="network">QoS i routing</button>
   </nav>
   <main>
     <section id="panel-overview" class="panel active">
@@ -28,20 +29,72 @@
     <section id="panel-flows" class="panel">
       <label>Filtr <input type="search" id="flow-filter" placeholder="protokół, IP, reguła…"></label>
       <table id="flows-table">
-        <thead><tr><th>Przepływ</th><th>Protokół</th><th>Kategoria</th><th>Pakiety</th><th>Bajty</th><th>Reguła</th><th>Mark</th></tr></thead>
+        <thead><tr><th>Przepływ</th><th>Protokół</th><th>Host</th><th>Kategoria</th><th>Pewność</th><th>Ryzyka</th><th>Pakiety</th><th>Bajty</th><th>Reguła</th><th>Mark</th><th></th></tr></thead>
         <tbody></tbody>
       </table>
     </section>
     <section id="panel-rules" class="panel">
-      <p id="rules-readonly" class="warn hidden">Tryb tylko do odczytu — uruchom z <code>-c plik.yaml</code>, aby edytować reguły.</p>
-      <div class="nft-readonly" id="nft-info"></div>
+      <p id="rules-readonly" class="banner warn hidden">Tryb tylko do odczytu — uruchom router z <code>-c plik.yaml</code>, aby edytować reguły.</p>
+      <div class="rules-toolbar">
+        <div class="nft-info" id="nft-info"></div>
+        <span id="rules-dirty" class="badge badge-warn hidden">Niezastosowane zmiany</span>
+      </div>
+      <details class="help">
+        <summary>Jak działają reguły?</summary>
+        <ul>
+          <li>Reguły są sprawdzane <b>od góry</b> — przepływ dostaje akcję <b>pierwszej</b> pasującej reguły. Kolejność zmienisz strzałkami ↑ ↓.</li>
+          <li>Reguła pasuje, gdy spełnione są <b>wszystkie</b> jej warunki (AND).</li>
+          <li><b>Oznacz</b> nadaje znacznik (fwmark) używany przez klasy QoS i trasy routingu z zakładki „QoS i routing”. <b>Zablokuj</b> odrzuca ruch.</li>
+          <li><b>Zastosuj</b> działa od razu, bez restartu — dla przepływów sklasyfikowanych po zmianie. Trwające połączenia zachowują dotychczasowy znacznik.</li>
+          <li><b>Zapisz do pliku</b> utrwala aktywne reguły w pliku YAML, aby przetrwały restart.</li>
+          <li>Wartości podpowiadane są z bazy nDPI i z bieżącego ruchu. Regułę możesz też utworzyć z zakładki „Przepływy” przyciskiem <b>＋</b>.</li>
+        </ul>
+      </details>
       <div id="rules-editor"></div>
-      <div class="actions">
-        <button type="button" id="btn-add-rule">Dodaj regułę</button>
+      <div id="rules-empty" class="empty hidden">Brak reguł — cały ruch przechodzi bez zmian. Kliknij „Dodaj regułę”.</div>
+      <div id="rule-datalists"></div>
+      <datalist id="mark-hints"></datalist>
+      <div class="actions sticky-actions">
+        <button type="button" id="btn-add-rule">＋ Dodaj regułę</button>
+        <span class="msg spacer" id="rules-msg" role="status"></span>
+        <button type="button" id="btn-discard">Odrzuć zmiany</button>
         <button type="button" id="btn-apply" class="primary">Zastosuj</button>
         <button type="button" id="btn-save">Zapisz do pliku</button>
       </div>
-      <p class="note" id="rules-msg"></p>
+    </section>
+    <section id="panel-network" class="panel">
+      <h2>Interfejsy sieciowe</h2>
+      <div class="nft-info" id="iface-aliases"></div>
+      <table id="iface-table">
+        <thead><tr><th>Interfejs</th><th>Rola</th><th>Stan</th><th>Adresy</th><th>Brama</th><th>Prędkość karty</th><th>MAC</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <details class="help">
+        <summary>Aliasy interfejsów — jeden plik dla GNS3 i Raspberry Pi</summary>
+        <ul>
+          <li><b>wan</b> — interfejs z trasą domyślną (wyjście do internetu).</li>
+          <li><b>lan</b> — interfejs przechwytywania (<code>-i</code>), a jeśli to WAN — jedyny pozostały interfejs z adresem IP.</li>
+          <li><b>auto</b> — jak <b>lan</b>; na maszynie z jednym interfejsem wybiera <b>wan</b>.</li>
+          <li>Alias wpisz w polu <code>"name"</code> interfejsu QoS albo we fladze <code>-i</code>, np. <code>-i lan</code>. Zapis do pliku zachowuje alias, więc konfiguracja nie wymaga zmian po przeniesieniu na inne urządzenie.</li>
+          <li><b>Prędkość karty</b> to nie przepustowość łącza od operatora — <code>rate</code> interfejsu ustaw nieco poniżej realnej prędkości łącza.</li>
+        </ul>
+      </details>
+      <h2>QoS (tc HTB)</h2>
+      <div class="nft-info" id="qos-bindings"></div>
+      <textarea id="qos-json" rows="10" class="code"></textarea>
+      <div class="actions">
+        <button type="button" id="btn-qos-apply" class="primary">Zastosuj QoS</button>
+      </div>
+      <label>Statystyki interfejsu <select id="qos-iface"></select></label>
+      <button type="button" id="btn-qos-stats">Odśwież statystyki</button>
+      <table id="qos-stats-table"><thead><tr><th>Klasa</th><th>Nazwa</th><th>Bajty</th><th>Pakiety</th><th>Drop</th></tr></thead><tbody></tbody></table>
+      <h2>Routing (ip rule)</h2>
+      <textarea id="routing-json" rows="8" class="code"></textarea>
+      <div class="actions">
+        <button type="button" id="btn-routing-apply" class="primary">Zastosuj routing</button>
+        <button type="button" id="btn-network-save">Zapisz całość do pliku</button>
+      </div>
+      <p class="note" id="network-msg"></p>
     </section>
   </main>
   <script src="/static/app.js"></script>

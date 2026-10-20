@@ -3,6 +3,7 @@ package control_test
 import (
 	"context"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -37,7 +38,7 @@ rules:
 	}
 	m := policy.NewMatcher(cfg)
 	table := flow.NewTable(eng, flow.Config{})
-	ctrl := control.New(eng, table, cfg, m, nil, "/tmp/policy.yaml", true)
+	ctrl := control.New(eng, table, cfg, m, nil, "/tmp/policy.yaml", true, nil, "", 0)
 	stop := startCommandPump(ctrl)
 	defer stop()
 
@@ -63,6 +64,75 @@ rules:
 	}
 }
 
+func TestSetRulesConcurrentWithPipeline(t *testing.T) {
+	eng, err := dpi.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer eng.Close()
+
+	cfg, err := policy.LoadBytes([]byte(`
+nftables:
+  drop_mark: 0xdead
+rules:
+  - name: base
+    match: { protocol: DNS }
+    action: mark
+    mark: 0x10
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cfg.Validate(eng); err != nil {
+		t.Fatal(err)
+	}
+	m := policy.NewMatcher(cfg)
+	table := flow.NewTable(eng, flow.Config{})
+	ctrl := control.New(eng, table, cfg, m, nil, "/tmp/policy.yaml", true, nil, "", 0)
+
+	path := filepath.Join("..", "..", "testdata", "dns.pcap")
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for ctx.Err() == nil {
+			src, err := capture.OpenFile(path, "")
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			var last time.Time
+			_ = src.Run(ctx, func(p *capture.Packet) {
+				ctrl.TryProcessCommands()
+				last = p.Timestamp
+				table.Handle(p)
+			}, func(now time.Time) {
+				ctrl.TryProcessCommands()
+				ctrl.Tick(now, src.Stats())
+			})
+			src.Close()
+			if !last.IsZero() {
+				ctrl.Tick(last.Add(time.Second), capture.Stats{})
+			}
+		}
+	}()
+
+	for i := 0; i < 50; i++ {
+		name := "rule-" + string(rune('a'+i%26))
+		err := ctrl.SetRules([]policy.Rule{
+			{Name: name, Match: map[string]string{"protocol": "DNS"}, Action: "mark", Mark: uint32(0x10 + i)},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	cancel()
+	wg.Wait()
+}
+
 func TestSnapshotFromPcap(t *testing.T) {
 	eng, err := dpi.New()
 	if err != nil {
@@ -73,7 +143,7 @@ func TestSnapshotFromPcap(t *testing.T) {
 	table := flow.NewTable(eng, flow.Config{
 		OnEnd: func(f *flow.Flow) {},
 	})
-	ctrl := control.New(eng, table, nil, nil, nil, "", false)
+	ctrl := control.New(eng, table, nil, nil, nil, "", false, nil, "", 0)
 
 	path := filepath.Join("..", "..", "testdata", "dns.pcap")
 	src, err := capture.OpenFile(path, "")

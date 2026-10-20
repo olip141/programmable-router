@@ -10,6 +10,7 @@ import (
 
 	"edge-router/internal/capture"
 	"edge-router/internal/dpi"
+	"edge-router/internal/metrics"
 )
 
 // Config tunes a Table. Zero values select the defaults.
@@ -27,6 +28,11 @@ type Config struct {
 	OnClassified func(*Flow)
 	// OnEnd is called when a flow is removed by Expire or Close.
 	OnEnd func(*Flow)
+
+	// NoDPI skips nDPI inspection (baseline capture overhead).
+	NoDPI bool
+	// Metrics receives pipeline counters when non-nil.
+	Metrics *metrics.Collector
 }
 
 const (
@@ -75,6 +81,12 @@ func (t *Table) Range(fn func(*Flow)) {
 // Handle accounts p to its flow and, while inspection is still running,
 // feeds it to nDPI. The returned flow stays valid after p is reused.
 func (t *Table) Handle(p *capture.Packet) *Flow {
+	var start time.Time
+	var sampled bool
+	if m := t.cfg.Metrics; m != nil {
+		m.OnPacket(p.WireLen)
+		start, sampled = m.SampleHandle()
+	}
 	key, _ := NewKey(p.Src, p.Dst, p.SrcPort, p.DstPort, p.Proto)
 	f := t.flows[key]
 	if f == nil {
@@ -84,14 +96,19 @@ func (t *Table) Handle(p *capture.Packet) *Flow {
 			Server:    netip.AddrPortFrom(p.Dst, p.DstPort),
 			FirstSeen: p.Timestamp,
 		}
-		if st, err := t.eng.NewFlow(); err == nil {
+		if t.cfg.NoDPI {
+			f.Done = true
+			f.Protocol = "Unknown"
+		} else if st, err := t.eng.NewFlow(); err == nil {
 			f.state = st
 		} else {
-			// Without nDPI state the flow is only counted.
 			f.Done = true
 			f.Protocol = "Unknown"
 		}
 		t.flows[key] = f
+		if t.cfg.Metrics != nil {
+			t.cfg.Metrics.OnFlowNew()
+		}
 		if t.cfg.OnNew != nil {
 			t.cfg.OnNew(f)
 		}
@@ -104,6 +121,9 @@ func (t *Table) Handle(p *capture.Packet) *Flow {
 	}
 
 	if f.Done {
+		if sampled {
+			t.cfg.Metrics.ObserveHandle(start)
+		}
 		return f
 	}
 	f.Result = t.eng.Process(f.state, p.L3, uint64(p.Timestamp.UnixMilli()))
@@ -114,7 +134,21 @@ func (t *Table) Handle(p *capture.Packet) *Flow {
 	case f.DPIPackets >= t.cfg.MaxDPIPackets:
 		t.finish(f, true)
 	}
+	if sampled {
+		t.cfg.Metrics.ObserveHandle(start)
+	}
 	return f
+}
+
+// ActiveDPIStates counts flows still holding nDPI C state.
+func (t *Table) ActiveDPIStates() int {
+	n := 0
+	for _, f := range t.flows {
+		if !f.Done && f.state != nil {
+			n++
+		}
+	}
+	return n
 }
 
 // finish ends inspection and frees the nDPI state right away, so that
@@ -128,9 +162,21 @@ func (t *Table) finish(f *Flow, giveUp bool) {
 	if f.Result.App != 0 {
 		f.App = t.eng.ProtoName(f.Result.App)
 	}
+	// nDPI reports plain protocols (SSH, DNS) as app with no master; the
+	// protocol is then its own base protocol, so "master: SSH" matches.
+	if f.Master == "" {
+		f.Master = f.App
+	}
 	f.Protocol = t.eng.ProtocolName(f.Result)
 	f.Category = t.eng.CategoryName(f.Result)
+	f.Meta = t.eng.Metadata(f.state, f.Result)
+	f.ClassifiedAt = f.LastSeen
 	f.Done = true
+	if t.cfg.Metrics != nil {
+		unknown := f.Protocol == "" || f.Protocol == "Unknown"
+		ms := f.ClassifiedAt.Sub(f.FirstSeen).Milliseconds()
+		t.cfg.Metrics.OnFlowClassified(giveUp, unknown, f.DPIPackets, ms)
+	}
 	f.state.Free()
 	f.state = nil
 	if t.cfg.OnClassified != nil {

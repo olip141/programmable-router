@@ -1,10 +1,15 @@
 package policy
 
 import (
+	"errors"
 	"fmt"
+	"log"
 	"os"
+	"path"
 	"path/filepath"
+	"regexp"
 	"strings"
+	"syscall"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -13,27 +18,143 @@ import (
 	"edge-router/internal/flow"
 )
 
+var qosRateRe = regexp.MustCompile(`^\d+(\.\d+)?(bit|kbit|mbit|gbit)$`)
+
 // Config is the administrator policy file (YAML).
 type Config struct {
-	NFTables NFTConfig `yaml:"nftables"`
-	Rules    []Rule    `yaml:"rules"`
+	NFTables NFTConfig     `yaml:"nftables" json:"nftables"`
+	QoS      QoSConfig     `yaml:"qos,omitempty" json:"qos"`
+	Routing  RoutingConfig `yaml:"routing,omitempty" json:"routing"`
+	Rules    []Rule        `yaml:"rules" json:"rules"`
+}
+
+// QoSConfig describes HTB shaping applied via tc.
+type QoSConfig struct {
+	Enabled    bool           `yaml:"enabled" json:"enabled"`
+	Interfaces []QoSInterface `yaml:"interfaces" json:"interfaces"`
+	Classes    []QoSClass     `yaml:"classes" json:"classes"`
+}
+
+// QoSInterface is one egress interface to shape. Name may be an alias
+// ("wan", "lan", "auto"); Resolved holds the device it maps to and is never
+// written back, so a saved file keeps the alias.
+type QoSInterface struct {
+	Name     string `yaml:"name" json:"name"`
+	Rate     string `yaml:"rate" json:"rate"`
+	Resolved string `yaml:"-" json:"-"`
+}
+
+// Device returns the interface tc should configure.
+func (i QoSInterface) Device() string {
+	if i.Resolved != "" {
+		return i.Resolved
+	}
+	return strings.TrimSpace(i.Name)
+}
+
+// ResolveQoSInterfaces fills Resolved for every interface. Interfaces that
+// fail to resolve, or map to a device already listed, are left with Resolved
+// empty and reported in the joined error.
+func ResolveQoSInterfaces(q *QoSConfig, resolve func(string) (string, error)) error {
+	if !q.Enabled {
+		return nil
+	}
+	var errs []error
+	seen := map[string]string{}
+	for i := range q.Interfaces {
+		ifc := &q.Interfaces[i]
+		ifc.Resolved = ""
+		dev, err := resolve(ifc.Name)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("qos: interface %q: %w", ifc.Name, err))
+			continue
+		}
+		if prev, ok := seen[dev]; ok {
+			errs = append(errs, fmt.Errorf("qos: interfaces %q and %q are both %s", prev, ifc.Name, dev))
+			continue
+		}
+		seen[dev] = ifc.Name
+		ifc.Resolved = dev
+	}
+	return errors.Join(errs...)
+}
+
+// QoSClass maps an nftables fwmark to an HTB class.
+type QoSClass struct {
+	Name string `yaml:"name" json:"name"`
+	Mark uint32 `yaml:"mark" json:"mark"`
+	Rate string `yaml:"rate" json:"rate"`
+	Ceil string `yaml:"ceil,omitempty" json:"ceil,omitempty"`
+	Prio int    `yaml:"prio,omitempty" json:"prio,omitempty"`
+}
+
+// RoutingConfig describes policy routing via ip rule/route.
+type RoutingConfig struct {
+	Enabled bool           `yaml:"enabled" json:"enabled"`
+	Routes  []RoutingRoute `yaml:"routes" json:"routes"`
+}
+
+// RoutingRoute sends marked traffic to an alternate routing table.
+type RoutingRoute struct {
+	Name    string `yaml:"name" json:"name"`
+	Mark    uint32 `yaml:"mark" json:"mark"`
+	Table   int    `yaml:"table" json:"table"`
+	Gateway string `yaml:"gateway" json:"gateway"`
+	Dev     string `yaml:"dev,omitempty" json:"dev,omitempty"`
+	Pref    int    `yaml:"pref,omitempty" json:"pref,omitempty"`
 }
 
 // NFTConfig controls the kernel ruleset installed by the enforcer.
 type NFTConfig struct {
-	Table           string        `yaml:"table"`
-	Hooks           []string      `yaml:"hooks"`
-	DropMark        uint32        `yaml:"drop_mark"`
-	ElementTimeout  time.Duration `yaml:"element_timeout"`
-	DropMarkParsed  uint32        `yaml:"-"`
+	Table              string        `yaml:"table" json:"table"`
+	Hooks              []string      `yaml:"hooks" json:"hooks"`
+	DropMark           uint32        `yaml:"drop_mark" json:"drop_mark"`
+	ElementTimeout     time.Duration `yaml:"element_timeout" json:"element_timeout"`
+	RestoreMark        *bool         `yaml:"restore_mark,omitempty" json:"restore_mark,omitempty"`
+	DropMarkParsed     uint32        `yaml:"-" json:"-"`
+	RestoreMarkEnabled bool          `yaml:"-" json:"-"`
 }
 
 // Rule maps a match (AND of fields) to an action.
 type Rule struct {
-	Name   string            `yaml:"name"`
-	Match  map[string]string `yaml:"match"`
-	Action string            `yaml:"action"`
-	Mark   uint32            `yaml:"mark"`
+	Name   string            `yaml:"name" json:"name"`
+	Match  map[string]string `yaml:"match" json:"match"`
+	Action string            `yaml:"action" json:"action"`
+	Mark   uint32            `yaml:"mark,omitempty" json:"mark"`
+}
+
+// Clone returns a deep copy, so the result can be normalised or validated
+// while other goroutines read c.
+func (c *Config) Clone() *Config {
+	out := *c
+	out.NFTables.Hooks = append([]string(nil), c.NFTables.Hooks...)
+	if c.NFTables.RestoreMark != nil {
+		v := *c.NFTables.RestoreMark
+		out.NFTables.RestoreMark = &v
+	}
+	out.QoS.Interfaces = append([]QoSInterface(nil), c.QoS.Interfaces...)
+	out.QoS.Classes = append([]QoSClass(nil), c.QoS.Classes...)
+	out.Routing.Routes = append([]RoutingRoute(nil), c.Routing.Routes...)
+	out.Rules = CloneRules(c.Rules)
+	return &out
+}
+
+// CloneRules deep-copies rules including their match maps.
+func CloneRules(rules []Rule) []Rule {
+	if rules == nil {
+		return nil
+	}
+	out := make([]Rule, len(rules))
+	for i, r := range rules {
+		out[i] = r
+		if r.Match != nil {
+			out[i].Match = make(map[string]string, len(r.Match))
+			for k, v := range r.Match {
+				out[i].Match[k] = v
+			}
+		}
+	}
+	return out
 }
 
 // Decision is the enforcement outcome for a classified flow.
@@ -73,6 +194,19 @@ func SaveFile(path string, cfg *Config) error {
 	}
 	tmpName := tmp.Name()
 	defer func() { _ = os.Remove(tmpName) }()
+	// CreateTemp uses 0600; keep the original mode and owner so that saving
+	// from a root-run router does not lock the admin out of the file.
+	mode := os.FileMode(0o644)
+	if st, err := os.Stat(path); err == nil {
+		mode = st.Mode().Perm()
+		if sys, ok := st.Sys().(*syscall.Stat_t); ok {
+			_ = tmp.Chown(int(sys.Uid), int(sys.Gid))
+		}
+	}
+	if err := tmp.Chmod(mode); err != nil {
+		_ = tmp.Close()
+		return err
+	}
 	if _, err := tmp.Write(data); err != nil {
 		_ = tmp.Close()
 		return err
@@ -118,6 +252,10 @@ func (c *Config) normalize() error {
 	if c.NFTables.ElementTimeout <= 0 {
 		c.NFTables.ElementTimeout = 300 * time.Second
 	}
+	c.NFTables.RestoreMarkEnabled = true
+	if c.NFTables.RestoreMark != nil {
+		c.NFTables.RestoreMarkEnabled = *c.NFTables.RestoreMark
+	}
 	for i := range c.Rules {
 		r := &c.Rules[i]
 		if r.Name == "" {
@@ -137,7 +275,7 @@ func (c *Config) normalize() error {
 		}
 		for k := range r.Match {
 			switch strings.ToLower(k) {
-			case "protocol", "master", "app", "category":
+			case "protocol", "master", "app", "category", "host", "risk", "confidence":
 			default:
 				return fmt.Errorf("policy: rule %q: unknown match field %q", r.Name, k)
 			}
@@ -148,17 +286,30 @@ func (c *Config) normalize() error {
 
 // WithRules returns a copy of c with rules replaced and normalised.
 func (c *Config) WithRules(rules []Rule) (*Config, error) {
-	out := *c
-	out.Rules = rules
+	out := c.Clone()
+	out.Rules = CloneRules(rules)
 	if err := out.normalize(); err != nil {
 		return nil, err
 	}
-	return &out, nil
+	return out, nil
 }
 
-// Validate checks protocol and category names against nDPI.
+// ValidateNetwork checks the qos and routing sections. Unlike Validate it
+// does not touch the nDPI engine, so it is safe on any goroutine.
+func (c *Config) ValidateNetwork() error {
+	if err := validateQoS(c.QoS, c.NFTables.DropMarkParsed); err != nil {
+		return err
+	}
+	return validateRouting(c.Routing)
+}
+
+// Validate checks protocol and category names against nDPI and canonicalises match values.
 func (c *Config) Validate(eng *dpi.Engine) error {
-	for _, r := range c.Rules {
+	if err := c.ValidateNetwork(); err != nil {
+		return err
+	}
+	for i := range c.Rules {
+		r := &c.Rules[i]
 		for k, v := range r.Match {
 			v = strings.TrimSpace(v)
 			if v == "" {
@@ -166,21 +317,80 @@ func (c *Config) Validate(eng *dpi.Engine) error {
 			}
 			switch strings.ToLower(k) {
 			case "protocol":
-				if _, ok := eng.LookupProtocol(v); !ok {
+				res, ok := eng.LookupProtocol(v)
+				if !ok {
 					return fmt.Errorf("policy: rule %q: unknown protocol %q", r.Name, v)
 				}
+				r.Match[k] = eng.ProtocolName(res)
 			case "master", "app":
-				if _, ok := eng.ProtoByName(v); !ok {
+				id, ok := eng.ProtoByName(v)
+				if !ok {
 					return fmt.Errorf("policy: rule %q: unknown %s %q", r.Name, k, v)
 				}
+				r.Match[k] = eng.ProtoName(id)
 			case "category":
-				if _, ok := eng.CategoryID(v); !ok {
+				id, ok := eng.CategoryID(v)
+				if !ok {
 					return fmt.Errorf("policy: rule %q: unknown category %q", r.Name, v)
 				}
+				r.Match[k] = eng.CategoryNameByID(id)
+			case "host":
+				r.Match[k] = v
+			case "risk":
+				if !riskKnown(eng, v) {
+					return fmt.Errorf("policy: rule %q: unknown risk %q", r.Name, v)
+				}
+				r.Match[k] = canonicalRiskName(eng, v)
+			case "confidence":
+				if !confidenceKnown(eng, v) {
+					return fmt.Errorf("policy: rule %q: unknown confidence %q", r.Name, v)
+				}
+				r.Match[k] = canonicalConfidenceName(eng, v)
 			}
 		}
 	}
 	return nil
+}
+
+// WarnOrphanMarks logs when a rule mark has no QoS class or routing entry.
+func WarnOrphanMarks(c *Config) {
+	for _, msg := range OrphanMarks(c) {
+		log.Printf("policy: warning: %s", msg)
+	}
+}
+
+// OrphanMarks lists mark rules whose mark has no QoS class or routing route.
+func OrphanMarks(c *Config) []string {
+	var out []string
+	qosMarks := map[uint32]bool{}
+	for _, cl := range c.QoS.Classes {
+		qosMarks[cl.Mark] = true
+	}
+	rtMarks := map[uint32]bool{}
+	for _, r := range c.Routing.Routes {
+		rtMarks[r.Mark] = true
+	}
+	for _, rule := range c.Rules {
+		if rule.Action != "mark" || rule.Mark == 0 {
+			continue
+		}
+		if !qosMarks[rule.Mark] && !rtMarks[rule.Mark] {
+			out = append(out, fmt.Sprintf("rule %q mark 0x%x has no qos class or routing route", rule.Name, rule.Mark))
+		}
+	}
+	return out
+}
+
+// WithNetwork returns a copy with QoS and routing replaced.
+func (c *Config) WithNetwork(qosCfg QoSConfig, rtCfg RoutingConfig) (*Config, error) {
+	out := c.Clone()
+	net := (&Config{QoS: qosCfg, Routing: rtCfg}).Clone()
+	out.QoS = net.QoS
+	out.Routing = net.Routing
+	if err := out.normalize(); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // Matcher applies rules in file order (first match wins).
@@ -226,19 +436,31 @@ func matchRule(r Rule, f *flow.Flow) bool {
 		want = strings.TrimSpace(want)
 		switch strings.ToLower(k) {
 		case "protocol":
-			if f.Protocol != want {
+			if !strings.EqualFold(f.Protocol, want) {
 				return false
 			}
 		case "master":
-			if f.Master != want {
+			if !strings.EqualFold(f.Master, want) {
 				return false
 			}
 		case "app":
-			if f.App != want {
+			if !strings.EqualFold(f.App, want) {
 				return false
 			}
 		case "category":
-			if f.Category != want {
+			if !strings.EqualFold(f.Category, want) {
+				return false
+			}
+		case "host":
+			if !hostMatch(want, f.Meta.Host) {
+				return false
+			}
+		case "risk":
+			if !flowHasRisk(f, want) {
+				return false
+			}
+		case "confidence":
+			if !strings.EqualFold(f.Meta.Confidence, want) {
 				return false
 			}
 		default:
@@ -246,4 +468,141 @@ func matchRule(r Rule, f *flow.Flow) bool {
 		}
 	}
 	return true
+}
+
+func hostMatch(pattern, host string) bool {
+	pattern = strings.TrimSpace(pattern)
+	host = strings.TrimSpace(host)
+	if pattern == "" || host == "" {
+		return false
+	}
+	pl := strings.ToLower(pattern)
+	hl := strings.ToLower(host)
+	if pl == hl {
+		return true
+	}
+	if !strings.Contains(pl, "*") {
+		return false
+	}
+	// "*.example.com" also covers the apex "example.com".
+	if apex, ok := strings.CutPrefix(pl, "*."); ok && hl == apex {
+		return true
+	}
+	ok, err := path.Match(pl, hl)
+	return err == nil && ok
+}
+
+func flowHasRisk(f *flow.Flow, want string) bool {
+	for _, r := range f.Meta.Risks {
+		if strings.EqualFold(r, want) {
+			return true
+		}
+	}
+	return false
+}
+
+func riskKnown(eng *dpi.Engine, name string) bool {
+	for _, r := range eng.Risks() {
+		if strings.EqualFold(r, name) {
+			return true
+		}
+	}
+	return false
+}
+
+func canonicalRiskName(eng *dpi.Engine, name string) string {
+	for _, r := range eng.Risks() {
+		if strings.EqualFold(r, name) {
+			return r
+		}
+	}
+	return name
+}
+
+func confidenceKnown(eng *dpi.Engine, name string) bool {
+	for _, c := range eng.Confidences() {
+		if strings.EqualFold(c, name) {
+			return true
+		}
+	}
+	return false
+}
+
+func canonicalConfidenceName(eng *dpi.Engine, name string) string {
+	for _, c := range eng.Confidences() {
+		if strings.EqualFold(c, name) {
+			return c
+		}
+	}
+	return name
+}
+
+func validateQoS(cfg QoSConfig, dropMark uint32) error {
+	if !cfg.Enabled {
+		return nil
+	}
+	if len(cfg.Interfaces) == 0 {
+		return fmt.Errorf("qos: enabled but no interfaces")
+	}
+	seenMark := map[uint32]string{}
+	for _, ifc := range cfg.Interfaces {
+		if strings.TrimSpace(ifc.Name) == "" {
+			return fmt.Errorf("qos: interface missing name")
+		}
+		if !qosRateRe.MatchString(strings.TrimSpace(ifc.Rate)) {
+			return fmt.Errorf("qos: interface %q: invalid rate %q", ifc.Name, ifc.Rate)
+		}
+	}
+	for _, cl := range cfg.Classes {
+		if strings.TrimSpace(cl.Name) == "" {
+			return fmt.Errorf("qos: class missing name")
+		}
+		if cl.Mark == 0 {
+			return fmt.Errorf("qos: class %q: mark required", cl.Name)
+		}
+		if cl.Mark == dropMark {
+			return fmt.Errorf("qos: class %q: mark conflicts with drop_mark", cl.Name)
+		}
+		if prev, ok := seenMark[cl.Mark]; ok {
+			return fmt.Errorf("qos: duplicate mark 0x%x (%s and %s)", cl.Mark, prev, cl.Name)
+		}
+		seenMark[cl.Mark] = cl.Name
+		if !qosRateRe.MatchString(strings.TrimSpace(cl.Rate)) {
+			return fmt.Errorf("qos: class %q: invalid rate %q", cl.Name, cl.Rate)
+		}
+	}
+	return nil
+}
+
+func validateRouting(cfg RoutingConfig) error {
+	if !cfg.Enabled {
+		return nil
+	}
+	if len(cfg.Routes) == 0 {
+		return fmt.Errorf("routing: enabled but no routes")
+	}
+	seenPref := map[int]string{}
+	for _, r := range cfg.Routes {
+		if strings.TrimSpace(r.Name) == "" {
+			return fmt.Errorf("routing: route missing name")
+		}
+		if r.Mark == 0 {
+			return fmt.Errorf("routing: route %q: mark required", r.Name)
+		}
+		if r.Table < 1 || r.Table > 252 {
+			return fmt.Errorf("routing: route %q: table must be 1-252", r.Name)
+		}
+		if strings.TrimSpace(r.Gateway) == "" {
+			return fmt.Errorf("routing: route %q: gateway required", r.Name)
+		}
+		pref := r.Pref
+		if pref == 0 {
+			pref = 1000
+		}
+		if prev, ok := seenPref[pref]; ok {
+			return fmt.Errorf("routing: duplicate pref %d (%s and %s)", pref, prev, r.Name)
+		}
+		seenPref[pref] = r.Name
+	}
+	return nil
 }

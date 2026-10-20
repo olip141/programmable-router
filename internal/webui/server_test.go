@@ -37,7 +37,7 @@ func TestAPIRulesAndStatic(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK || !bytes.Contains(rec.Body.Bytes(), []byte("Programowalny router")) {
+	if rec.Code != http.StatusOK || !bytes.Contains(rec.Body.Bytes(), []byte(`id="panel-rules"`)) {
 		t.Fatalf("index: %d %q", rec.Code, rec.Body.Bytes()[:min(80, rec.Body.Len())])
 	}
 
@@ -92,7 +92,7 @@ rules:
 	}
 	m := policy.NewMatcher(cfg)
 	table := flow.NewTable(eng, flow.Config{})
-	ctrl := control.New(eng, table, cfg, m, nil, t.TempDir()+"/policy.yaml", true)
+	ctrl := control.New(eng, table, cfg, m, nil, t.TempDir()+"/policy.yaml", true, nil, "", 0)
 	stop := startCommandPump(ctrl)
 
 	passFile := ""
@@ -101,11 +101,11 @@ rules:
 		_ = os.WriteFile(passFile, []byte("secret\n"), 0600)
 	}
 	srv, err := webui.New(webui.Options{
-		Addr:         "127.0.0.1:0",
-		User:         "admin",
-		PassFile:     passFile,
-		Controller:   ctrl,
-		ConfigPath:   filepath.Join(t.TempDir(), "policy.yaml"),
+		Addr:       "127.0.0.1:0",
+		User:       "admin",
+		PassFile:   passFile,
+		Controller: ctrl,
+		ConfigPath: filepath.Join(t.TempDir(), "policy.yaml"),
 	})
 	if err != nil {
 		t.Fatal(err)

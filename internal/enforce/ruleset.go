@@ -23,6 +23,16 @@ const rulesetTmpl = `table inet {{.Table}} {
 		meta mark {{.DropMarkHex}} drop
 		accept
 	}
+{{if .RestoreMark}}
+	chain dpi_restore {
+		type filter hook prerouting priority mangle; policy accept;
+		ct mark != 0 meta mark set ct mark
+	}
+	chain dpi_reroute {
+		type route hook output priority mangle; policy accept;
+		ct mark != 0 meta mark set ct mark
+	}
+{{end}}
 {{range .Hooks}}
 	chain dpi_{{.}} {
 		type filter hook {{.}} priority mangle; policy accept;
@@ -37,10 +47,11 @@ const rulesetTmpl = `table inet {{.Table}} {
 `
 
 type rulesetData struct {
-	Table        string
-	Hooks        []string
-	DropMarkHex  string
-	TimeoutSec   int
+	Table       string
+	Hooks       []string
+	DropMarkHex string
+	TimeoutSec  int
+	RestoreMark bool
 }
 
 func renderRuleset(cfg policy.NFTConfig) (string, error) {
@@ -53,6 +64,7 @@ func renderRuleset(cfg policy.NFTConfig) (string, error) {
 		Hooks:       cfg.Hooks,
 		DropMarkHex: fmt.Sprintf("0x%x", cfg.DropMarkParsed),
 		TimeoutSec:  int(cfg.ElementTimeout.Seconds()),
+		RestoreMark: cfg.RestoreMarkEnabled,
 	}
 	if data.TimeoutSec <= 0 {
 		data.TimeoutSec = 300

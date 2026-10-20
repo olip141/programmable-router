@@ -100,6 +100,103 @@ rules:
 	}
 }
 
+func TestValidateCanonicalizesMatchNames(t *testing.T) {
+	eng, err := dpi.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer eng.Close()
+
+	cfg, err := policy.LoadBytes([]byte(`
+rules:
+  - name: yt
+    match: { app: youtube }
+    action: mark
+    mark: 0x10
+  - name: ssh-low
+    match: { master: ssh }
+    action: mark
+    mark: 0x20
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cfg.Validate(eng); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Rules[0].Match["app"] != "YouTube" {
+		t.Fatalf("canonical app: %q", cfg.Rules[0].Match["app"])
+	}
+	if cfg.Rules[1].Match["master"] != "SSH" {
+		t.Fatalf("canonical master: %q", cfg.Rules[1].Match["master"])
+	}
+	m := policy.NewMatcher(cfg)
+	d, ok := m.Decide(&flow.Flow{App: "YouTube", Protocol: "TLS.YouTube"})
+	if !ok || d.Rule != "yt" {
+		t.Fatalf("youtube match: %+v ok=%v", d, ok)
+	}
+	d, ok = m.Decide(&flow.Flow{Master: "SSH", Protocol: "SSH"})
+	if !ok || d.Rule != "ssh-low" {
+		t.Fatalf("ssh match: %+v ok=%v", d, ok)
+	}
+}
+
+func TestQoSRoutingValidate(t *testing.T) {
+	cfg, err := policy.LoadBytes([]byte(`
+nftables:
+  drop_mark: 0xdead
+qos:
+  enabled: true
+  interfaces:
+    - { name: eth1, rate: 100mbit }
+  classes:
+    - { name: video, mark: 0x10, rate: 2mbit }
+routing:
+  enabled: true
+  routes:
+    - { name: alt, mark: 0x30, table: 200, gateway: 10.0.0.1 }
+rules: []
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	eng, _ := dpi.New()
+	defer eng.Close()
+	if err := cfg.Validate(eng); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestHostPolicyMatch(t *testing.T) {
+	eng, err := dpi.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer eng.Close()
+
+	cfg, err := policy.LoadBytes([]byte(`
+rules:
+  - name: google
+    match: { host: "*.google.com" }
+    action: mark
+    mark: 0x11
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cfg.Validate(eng); err != nil {
+		t.Fatal(err)
+	}
+	m := policy.NewMatcher(cfg)
+	f := &flow.Flow{
+		Meta: dpi.Metadata{Host: "www.google.com"},
+	}
+	d, ok := m.Decide(f)
+	if !ok || d.Rule != "google" {
+		t.Fatalf("host match: %+v ok=%v", d, ok)
+	}
+}
+
 func TestValidateProtocols(t *testing.T) {
 	eng, err := dpi.New()
 	if err != nil {

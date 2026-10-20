@@ -1,12 +1,13 @@
-# Host policy for GCP dev VM (no forwarding): mark on input/output.
 nftables:
-  table: dpi
-  hooks: [input, output]
-  drop_mark: 0xdead
-  element_timeout: 300s
-
+    table: dpi
+    hooks:
+        - input
+        - output
+    drop_mark: 57005
+    element_timeout: 5m0s
 rules:
-  - name: tls-google
-    match: { master: TLS }
-    action: mark
-    mark: 0x10
+    - name: tls-google
+      match:
+        master: TLS
+      action: mark
+      mark: 16

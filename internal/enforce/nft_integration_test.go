@@ -67,6 +67,43 @@ rules:
 	}
 }
 
+func TestNFTRulesetRestoreMarkChains(t *testing.T) {
+	requireRootNFT(t)
+	pol, err := policy.LoadBytes([]byte(`
+nftables:
+  table: dpi_test_restore
+  hooks: [forward]
+  drop_mark: 0xdead
+  element_timeout: 60s
+rules:
+  - name: dummy
+    match: { master: SSH }
+    action: mark
+    mark: 1
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rules, err := renderRuleset(pol.NFTables)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsAll(rules, "hook prerouting", "type route hook output", "chain dpi_restore", "chain dpi_reroute") {
+		t.Fatalf("ruleset missing restore chains:\n%s", rules)
+	}
+	e, err := NewNFTEnforcer(pol.NFTables, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = e.Close()
+		_ = exec.Command(nftBin, "delete", "table", "inet", "dpi_test_restore").Run()
+	}()
+	if err := e.Setup(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestNFTRulesetInputOutputHooks(t *testing.T) {
 	requireRootNFT(t)
 	pol, err := policy.LoadBytes([]byte(`

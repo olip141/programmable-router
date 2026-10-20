@@ -29,8 +29,28 @@ sudo sysctl -w net.ipv6.conf.all.forwarding=1
 ## Policy + capture
 
 ```bash
-sudo router -i eth1 -f "not port 22" -c /etc/edge-router/router.yaml -v
+sudo router -i lan -f "not port 22" -c /etc/edge-router/router.yaml -v
 ```
+
+### Interface names and aliases
+
+`-i` and `qos.interfaces[].name` accept an interface name or an alias, so the same
+policy file works in GNS3 (`ens3`, `ens4`) and on a Raspberry Pi (`eth0`, `end0`):
+
+| Alias | Resolves to |
+|---|---|
+| `wan` | interface holding the default route (lowest IPv4 metric) |
+| `lan` | the capture interface (`-i`) when it is not the WAN, else the only other up interface with a routable address |
+| `auto` | like `lan`; on a single-interface host it falls back to `wan` |
+
+Container bridges (`docker*`, `veth*`, `virbr*`, …) are never picked as LAN. When an
+alias is ambiguous (e.g. two LAN ports) or a name does not exist, the router stops
+with the list of available interfaces. Saving from the GUI keeps the alias in the file.
+The detected interfaces, their roles and the QoS bindings are shown in the GUI tab
+**QoS i routing** and served by `GET /api/interfaces`.
+
+Interfaces are resolved at startup and on every QoS change from the GUI; an
+interface that is recreated later (`ppp0`, `wg0`) needs **Zastosuj QoS** again.
 
 ## Admin GUI (L7 policy)
 
@@ -40,14 +60,14 @@ Enable the built-in web UI (static HTML/JS embedded in the binary):
 # On the router LAN (password required when not on loopback):
 echo 'your-password' | sudo tee /etc/edge-router/http-pass
 sudo chmod 600 /etc/edge-router/http-pass
-sudo router -i eth1 -f "not port 22" -c /etc/edge-router/router.yaml \
+sudo router -i lan -f "not port 22" -c /etc/edge-router/router.yaml \
   -http 0.0.0.0:8080 -http-user admin -http-pass-file /etc/edge-router/http-pass
 ```
 
 On the GCP dev VM (loopback only, password optional):
 
 ```bash
-./bin/router -i ens4 -f "not port 22" -c deploy/router-gcp.yaml -http 127.0.0.1:8080
+./bin/router -i auto -f "not port 22" -c deploy/router-gcp.yaml -http 127.0.0.1:8080
 ```
 
 From your laptop, tunnel to the VM:
@@ -61,7 +81,11 @@ The GUI provides overview stats, active flows, and live editing of policy rules 
 
 On a host without forwarding (e.g. GCP), use `deploy/router-gcp.yaml` with hooks `[input, output]`.
 
-## QoS and routing (after policy marks are set)
+## QoS and routing
+
+When `-c router.yaml` is used, the router applies `qos:` and `routing:` sections from the YAML via `tc` and `ip` on startup. Edit them in the admin GUI tab **QoS i routing** or adjust `deploy/router.yaml`.
+
+Manual alternative (same defaults as the example YAML):
 
 ```bash
 sudo deploy/qos.sh eth1 100mbit

@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"sort"
+	"strings"
 	"syscall"
 	"time"
 
@@ -17,12 +18,16 @@ import (
 	"edge-router/internal/dpi"
 	"edge-router/internal/enforce"
 	"edge-router/internal/flow"
+	"edge-router/internal/metrics"
+	"edge-router/internal/netinfo"
 	"edge-router/internal/policy"
+	"edge-router/internal/qos"
+	"edge-router/internal/routing"
 	"edge-router/internal/webui"
 )
 
 func main() {
-	iface := flag.String("i", "", "live capture interface")
+	iface := flag.String("i", "", "live capture interface, or auto|lan|wan")
 	pcapFile := flag.String("r", "", "offline pcap/pcapng file")
 	bpf := flag.String("f", "", "BPF filter (live capture)")
 	promisc := flag.Bool("promisc", false, "promiscuous mode")
@@ -33,12 +38,32 @@ func main() {
 	httpAddr := flag.String("http", "", "admin GUI listen address (e.g. 127.0.0.1:8080)")
 	httpUser := flag.String("http-user", "admin", "admin GUI HTTP basic auth user")
 	httpPassFile := flag.String("http-pass-file", "", "file containing admin GUI password")
+	enablePprof := flag.Bool("pprof", false, "expose /debug/pprof on admin HTTP server")
+	noDPI := flag.Bool("no-dpi", false, "skip nDPI (capture/flow baseline)")
+	dpiMaxPackets := flag.Int("dpi-max-packets", flow.DefaultMaxDPIPackets, "max packets per flow for nDPI")
+	tcpTimeout := flag.Duration("tcp-timeout", flow.DefaultTCPTimeout, "TCP flow idle timeout")
+	udpTimeout := flag.Duration("udp-timeout", flow.DefaultUDPTimeout, "UDP flow idle timeout")
+	statsFile := flag.String("stats-file", "", "append NDJSON metrics snapshots to file")
+	statsInterval := flag.Duration("stats-interval", time.Second, "metrics file write interval")
+	latencySample := flag.Uint64("latency-sample", 64, "sample 1/N packets for handle latency histogram")
 	flag.Parse()
 
 	if (*iface == "") == (*pcapFile == "") {
 		fmt.Fprintln(os.Stderr, "specify exactly one of -i or -r")
 		os.Exit(2)
 	}
+
+	host := &netinfo.Host{}
+	// Plain names go to pcap unchecked: it also accepts pseudo-devices like "any".
+	if netinfo.IsAlias(*iface) {
+		dev, err := host.Resolve(*iface)
+		if err != nil {
+			log.Fatalf("capture: %v", err)
+		}
+		log.Printf("capture interface: %s -> %s", *iface, dev)
+		*iface = dev
+	}
+	host.Capture = *iface
 
 	eng, err := dpi.New()
 	if err != nil {
@@ -56,13 +81,21 @@ func main() {
 		if err := polCfg.Validate(eng); err != nil {
 			log.Fatalf("policy: %v", err)
 		}
+		policy.WarnOrphanMarks(polCfg)
 		matcher = policy.NewMatcher(polCfg)
 	}
 
+	// Offline replay and -dry-run never touch nftables, tc or ip rules.
+	networkDryRun := *dryRun || *pcapFile != ""
+	if polCfg != nil {
+		if err := resolveQoSInterfaces(polCfg, host, networkDryRun); err != nil {
+			log.Fatalf("policy: %v", err)
+		}
+	}
 	var enf enforce.Enforcer
+	var ctrl *control.Controller
 	if matcher != nil {
-		useLog := *dryRun || *pcapFile != ""
-		if useLog {
+		if networkDryRun {
 			enf = enforce.NewLogEnforcer()
 		} else {
 			nft, err := enforce.NewNFTEnforcer(polCfg.NFTables, !*noNftSetup)
@@ -75,12 +108,27 @@ func main() {
 			enf = nft
 			defer func() { _ = enf.Close() }()
 		}
+		if err := applyNetworkStack(polCfg, networkDryRun); err != nil {
+			log.Fatalf("network stack: %v", err)
+		}
+		if !networkDryRun {
+			// The GUI may replace qos/routing at runtime; tear down what is live at exit.
+			defer func() {
+				snap := ctrl.Snapshot()
+				teardownNetworkStack(&policy.Config{QoS: snap.QoS, Routing: snap.Routing})
+			}()
+		}
 	}
 
 	summary := flow.Summary{}
-	var ctrl *control.Controller
+	mcol := metrics.New(*latencySample)
 
 	cfg := flow.Config{
+		NoDPI:         *noDPI,
+		Metrics:       mcol,
+		MaxDPIPackets: *dpiMaxPackets,
+		TCPTimeout:    *tcpTimeout,
+		UDPTimeout:    *udpTimeout,
 		OnEnd: func(f *flow.Flow) {
 			summary.Add(f)
 			if ctrl != nil {
@@ -111,6 +159,7 @@ func main() {
 				if *verbose {
 					log.Printf("policy %q mark=0x%x %s", d.Rule, d.Mark, f.Key.String())
 				}
+				mcol.OnEnforceApply(f.Packets)
 				if err := enf.Apply(f, d); err != nil {
 					log.Printf("enforce apply: %v", err)
 				}
@@ -120,7 +169,9 @@ func main() {
 	table := flow.NewTable(eng, cfg)
 
 	policyEditable := *configPath != ""
-	ctrl = control.New(eng, table, polCfg, matcher, enf, *configPath, policyEditable)
+	ctrl = control.New(eng, table, polCfg, matcher, enf, *configPath, policyEditable, mcol, *statsFile, *statsInterval)
+	ctrl.SetNetworkDryRun(networkDryRun)
+	ctrl.SetHost(host)
 
 	var src *capture.Source
 	if *pcapFile != "" {
@@ -139,11 +190,12 @@ func main() {
 	var webSrv *webui.Server
 	if *httpAddr != "" {
 		webSrv, err = webui.New(webui.Options{
-			Addr:         *httpAddr,
-			User:         *httpUser,
-			PassFile:     *httpPassFile,
-			Controller:   ctrl,
-			ConfigPath:   *configPath,
+			Addr:        *httpAddr,
+			User:        *httpUser,
+			PassFile:    *httpPassFile,
+			Controller:  ctrl,
+			ConfigPath:  *configPath,
+			EnablePprof: *enablePprof,
 		})
 		if err != nil {
 			log.Fatalf("http: %v", err)
@@ -185,6 +237,50 @@ func main() {
 	active := table.Len()
 	table.Close()
 	printSummary(summary, active, table.Len(), ctrl.Matcher(), enf)
+}
+
+// resolveQoSInterfaces maps QoS interface names and aliases to devices. In
+// dry-run a missing interface is only logged, so a policy written for the
+// router can still be replayed on the build machine.
+func resolveQoSInterfaces(cfg *policy.Config, host *netinfo.Host, dryRun bool) error {
+	err := policy.ResolveQoSInterfaces(&cfg.QoS, host.Resolve)
+	for _, ifc := range cfg.QoS.Interfaces {
+		if ifc.Resolved != "" && ifc.Resolved != ifc.Name {
+			log.Printf("qos interface: %s -> %s", ifc.Name, ifc.Resolved)
+		}
+	}
+	if err != nil && dryRun {
+		log.Printf("dry-run: %v", err)
+		return nil
+	}
+	return err
+}
+
+func applyNetworkStack(cfg *policy.Config, dryRun bool) error {
+	if cfg == nil {
+		return nil
+	}
+	if dryRun {
+		for _, argv := range qos.Commands(cfg.QoS) {
+			log.Printf("dry-run: %s", strings.Join(argv, " "))
+		}
+		for _, argv := range routing.Commands(cfg.Routing) {
+			log.Printf("dry-run: %s", strings.Join(argv, " "))
+		}
+		return nil
+	}
+	if err := qos.Apply(cfg.QoS); err != nil {
+		return err
+	}
+	return routing.Apply(cfg.Routing)
+}
+
+func teardownNetworkStack(cfg *policy.Config) {
+	if cfg == nil {
+		return
+	}
+	qos.Teardown(cfg.QoS)
+	routing.Teardown(cfg.Routing)
 }
 
 func printSummary(summary flow.Summary, activeAtStop, remaining int, matcher *policy.Matcher, enf enforce.Enforcer) {

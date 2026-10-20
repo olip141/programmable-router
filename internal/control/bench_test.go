@@ -32,7 +32,7 @@ func benchmarkPcap(b *testing.B, path string, withTick bool) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		table := flow.NewTable(eng, flow.Config{})
-		ctrl := control.New(eng, table, nil, nil, nil, "", false)
+		ctrl := control.New(eng, table, nil, nil, nil, "", false, nil, "", 0)
 		src2, err := capture.OpenFile(path, "")
 		if err != nil {
 			b.Fatal(err)

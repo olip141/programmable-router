@@ -5,6 +5,20 @@ nftables:
   drop_mark: 0xdead
   element_timeout: 300s
 
+qos:
+  enabled: true
+  # name: wan | lan | auto | interface name (wan = interface with the default route)
+  interfaces:
+    - { name: wan, rate: 100mbit }
+  classes:
+    - { name: video-low-prio, mark: 0x10, rate: 2mbit, prio: 5 }
+    - { name: ssh-high-prio, mark: 0x20, rate: 3mbit, prio: 2 }
+    - { name: youtube-alt-wan, mark: 0x30, rate: 1mbit, prio: 4 }
+
+routing:
+  enabled: false
+  routes: null
+
 rules:
   - name: block-torrent
     match: { protocol: BitTorrent }

@@ -81,6 +81,10 @@ type Flow struct {
 	// PolicyRule and PolicyMark are set when a policy rule matched at classification.
 	PolicyRule string
 	PolicyMark uint32
+	// Meta holds L7 metadata from nDPI at classification time.
+	Meta dpi.Metadata
+	// ClassifiedAt is when inspection finished (usually LastSeen at classification).
+	ClassifiedAt time.Time
 	// Done means nDPI inspection has finished for this flow.
 	Done bool
 	// GaveUp means the classification comes from ndpi_detection_giveup

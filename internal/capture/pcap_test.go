@@ -64,18 +64,59 @@ func TestPcapHTTPGoogle(t *testing.T) {
 }
 
 func TestPcapTLSMicrosoft365(t *testing.T) {
-	l7 := runPcap(t, "tls-rdn-extract.pcap")
+	l7, meta := runPcapWithMeta(t, "tls-rdn-extract.pcap")
 	if len(l7) != 1 {
 		t.Fatalf("expected 1 flow, got %d", len(l7))
 	}
-	for _, name := range l7 {
+	for key, name := range l7 {
 		if name != "TLS.Microsoft365" {
 			t.Fatalf("expected TLS.Microsoft365, got %q", name)
+		}
+		m := meta[key]
+		if m.Host == "" {
+			t.Fatal("expected non-empty TLS host/SNI")
+		}
+		if m.TLS.Version == "" {
+			t.Fatal("expected TLS version metadata")
 		}
 	}
 }
 
+func TestPcapHTTPMetadata(t *testing.T) {
+	l7, meta := runPcapWithMeta(t, "http.pcapng")
+	if len(l7) != 1 {
+		t.Fatalf("expected 1 flow, got %d", len(l7))
+	}
+	for key := range l7 {
+		m := meta[key]
+		if m.Host == "" && m.HTTP.URL == "" {
+			t.Fatalf("expected HTTP host or URL metadata, got %+v", m)
+		}
+	}
+}
+
+func TestPcapDNSMetadata(t *testing.T) {
+	_, meta := runPcapWithMeta(t, "dns.pcap")
+	if len(meta) == 0 {
+		t.Fatal("no flows")
+	}
+	var withQType int
+	for _, m := range meta {
+		if m.DNS.QType != 0 {
+			withQType++
+		}
+	}
+	if withQType == 0 {
+		t.Fatal("expected DNS QType on at least one flow")
+	}
+}
+
 func runPcap(t *testing.T, name string) map[flow.Key]string {
+	l7, _ := runPcapWithMeta(t, name)
+	return l7
+}
+
+func runPcapWithMeta(t *testing.T, name string) (map[flow.Key]string, map[flow.Key]dpi.Metadata) {
 	t.Helper()
 	path := filepath.Join("..", "..", "testdata", name)
 
@@ -86,9 +127,11 @@ func runPcap(t *testing.T, name string) map[flow.Key]string {
 	defer eng.Close()
 
 	classified := make(map[flow.Key]string)
+	meta := make(map[flow.Key]dpi.Metadata)
 	table := flow.NewTable(eng, flow.Config{
 		OnClassified: func(f *flow.Flow) {
 			classified[f.Key] = f.Protocol
+			meta[f.Key] = f.Meta
 		},
 	})
 	defer table.Close()
@@ -119,5 +162,5 @@ func runPcap(t *testing.T, name string) map[flow.Key]string {
 	if len(classified) == 0 {
 		t.Fatal("no classified flows")
 	}
-	return classified
+	return classified, meta
 }

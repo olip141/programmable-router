@@ -10,11 +10,13 @@ import (
 	"io/fs"
 	"net"
 	"net/http"
+	"net/http/pprof"
 	"os"
 	"strings"
 	"time"
 
 	"edge-router/internal/control"
+	"edge-router/internal/metrics"
 	"edge-router/internal/policy"
 )
 
@@ -31,11 +33,12 @@ type Server struct {
 
 // Options configures the web UI.
 type Options struct {
-	Addr       string
-	User       string
-	PassFile   string
-	Controller *control.Controller
-	ConfigPath string
+	Addr        string
+	User        string
+	PassFile    string
+	Controller  *control.Controller
+	ConfigPath  string
+	EnablePprof bool
 }
 
 // New validates options and builds a Server. PassFile must contain the password (trimmed).
@@ -76,6 +79,18 @@ func New(opts Options) (*Server, error) {
 	mux.HandleFunc("/api/rules", s.handleRules)
 	mux.HandleFunc("/api/rules/save", s.handleRulesSave)
 	mux.HandleFunc("/api/meta", s.handleMeta)
+	mux.HandleFunc("/api/qos", s.handleQoS)
+	mux.HandleFunc("/api/qos/stats", s.handleQoSStats)
+	mux.HandleFunc("/api/routing", s.handleRouting)
+	mux.HandleFunc("/api/interfaces", s.handleInterfaces)
+	mux.HandleFunc("/metrics", s.handleMetrics)
+	if opts.EnablePprof {
+		mux.HandleFunc("/debug/pprof/", pprofIndex)
+		mux.HandleFunc("/debug/pprof/cmdline", pprofCmdline)
+		mux.HandleFunc("/debug/pprof/profile", pprofProfile)
+		mux.HandleFunc("/debug/pprof/symbol", pprofSymbol)
+		mux.HandleFunc("/debug/pprof/trace", pprofTrace)
+	}
 
 	s.http = &http.Server{
 		Addr:              opts.Addr,
@@ -183,16 +198,16 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	snap := s.ctrl.Snapshot()
 	writeJSON(w, http.StatusOK, map[string]any{
-		"at":            snap.At,
-		"uptime_sec":    snap.Uptime.Seconds(),
-		"packets_per_s": snap.PacketsPerSec,
-		"active_flows":  snap.ActiveFlows,
-		"capture":       snap.Capture,
-		"enforcer":      snap.Enforcer,
-		"rule_hits":     snap.RuleHits,
+		"at":              snap.At,
+		"uptime_sec":      snap.Uptime.Seconds(),
+		"packets_per_s":   snap.PacketsPerSec,
+		"active_flows":    snap.ActiveFlows,
+		"capture":         snap.Capture,
+		"enforcer":        snap.Enforcer,
+		"rule_hits":       snap.RuleHits,
 		"policy_editable": snap.PolicyEditable,
-		"config_path":   snap.ConfigPath,
-		"policy_note":   "New rules apply to flows classified after the change. Existing conntrack marks persist until expiry.",
+		"config_path":     snap.ConfigPath,
+		"policy_note":     "Nowe reguły obowiązują dla przepływów sklasyfikowanych po zmianie. Dotychczasowe znaczniki w conntracku pozostają do wygaśnięcia wpisu.",
 	})
 }
 
@@ -233,7 +248,10 @@ func (s *Server) handleFlows(w http.ResponseWriter, r *http.Request) {
 }
 
 func flowMatchesQuery(f control.FlowView, q string) bool {
-	fields := []string{f.Key, f.Client, f.Server, f.Protocol, f.Master, f.App, f.Category, f.PolicyRule}
+	fields := []string{f.Key, f.Client, f.Server, f.Protocol, f.Master, f.App, f.Category, f.Host, f.Confidence, f.PolicyRule}
+	for _, r := range f.Risks {
+		fields = append(fields, r)
+	}
 	for _, s := range fields {
 		if strings.Contains(strings.ToLower(s), q) {
 			return true
@@ -309,6 +327,112 @@ func (s *Server) handleRulesSave(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"saved": s.configPath})
 }
+
+func (s *Server) handleQoS(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, http.StatusOK, s.ctrl.Snapshot().QoS)
+	case http.MethodPut:
+		if !s.ctrl.Snapshot().PolicyEditable {
+			http.Error(w, "policy read-only", http.StatusForbidden)
+			return
+		}
+		if !s.requireJSON(w, r) {
+			return
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
+		var body policy.QoSConfig
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		rt := s.ctrl.Snapshot().Routing
+		if err := s.ctrl.SetNetwork(body, rt); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, http.StatusOK, s.ctrl.Snapshot().QoS)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) handleQoSStats(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	iface := strings.TrimSpace(r.URL.Query().Get("iface"))
+	if iface == "" {
+		http.Error(w, "iface query required", http.StatusBadRequest)
+		return
+	}
+	stats, err := s.ctrl.QoSStats(iface)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, stats)
+}
+
+func (s *Server) handleRouting(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, http.StatusOK, s.ctrl.Snapshot().Routing)
+	case http.MethodPut:
+		if !s.ctrl.Snapshot().PolicyEditable {
+			http.Error(w, "policy read-only", http.StatusForbidden)
+			return
+		}
+		if !s.requireJSON(w, r) {
+			return
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
+		var body policy.RoutingConfig
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		q := s.ctrl.Snapshot().QoS
+		if err := s.ctrl.SetNetwork(q, body); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, http.StatusOK, s.ctrl.Snapshot().Routing)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) handleInterfaces(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	view, err := s.ctrl.Interfaces()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, view)
+}
+
+func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	_, _ = w.Write([]byte(metrics.PrometheusText(s.ctrl.Snapshot().Metrics)))
+}
+
+var (
+	pprofIndex   = pprof.Index
+	pprofCmdline = pprof.Cmdline
+	pprofProfile = pprof.Profile
+	pprofSymbol  = pprof.Symbol
+	pprofTrace   = pprof.Trace
+)
 
 func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {

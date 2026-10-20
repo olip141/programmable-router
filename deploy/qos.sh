@@ -18,16 +18,16 @@ tc qdisc add dev "$IF" parent 1:999 handle 999: fq_codel
 # Mark 0x10 — low priority (e.g. media)
 tc class add dev "$IF" parent 1:1 classid 1:10 htb rate 2mbit ceil "$RATE" prio 5
 tc qdisc add dev "$IF" parent 1:10 handle 10: fq_codel
-tc filter add dev "$IF" parent 1: protocol ip handle 0x10 fw classid 1:10
+tc filter add dev "$IF" parent 1: protocol all handle 0x10 fw classid 1:10
 
 # Mark 0x20 — high priority (e.g. SSH)
 tc class add dev "$IF" parent 1:1 classid 1:20 htb rate 3mbit ceil "$RATE" prio 2
 tc qdisc add dev "$IF" parent 1:20 handle 20: fq_codel
-tc filter add dev "$IF" parent 1: protocol ip handle 0x20 fw classid 1:20
+tc filter add dev "$IF" parent 1: protocol all handle 0x20 fw classid 1:20
 
 # Mark 0x30 — alternate path (policy routing companion)
 tc class add dev "$IF" parent 1:1 classid 1:30 htb rate 1mbit ceil "$RATE" prio 4
 tc qdisc add dev "$IF" parent 1:30 handle 30: fq_codel
-tc filter add dev "$IF" parent 1: protocol ip handle 0x30 fw classid 1:30
+tc filter add dev "$IF" parent 1: protocol all handle 0x30 fw classid 1:30
 
 echo "QoS configured on $IF at $RATE"

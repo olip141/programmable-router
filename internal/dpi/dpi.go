@@ -10,6 +10,7 @@ package dpi
 #include <stdlib.h>
 #include <string.h>
 #include <ndpi_api.h>
+#include <ndpi_protocol_ids.h>
 
 typedef struct {
 	u_int16_t master;
@@ -83,6 +84,72 @@ static int router_category_id(struct ndpi_detection_module_struct *mod, const ch
 
 static u_int router_num_protocols(struct ndpi_detection_module_struct *mod) {
 	return ndpi_get_num_protocols(mod);
+}
+
+typedef struct {
+	char host[256];
+	char confidence[32];
+	u_int64_t risk_mask;
+	char ja4[40];
+	char ja3s[40];
+	char alpn[64];
+	char tls_version[32];
+	u_int16_t dns_qtype;
+	u_int8_t dns_rcode;
+	u_int8_t dns_answers;
+	char http_url[256];
+	char http_ua[128];
+} router_meta;
+
+static void router_copy_str(char *dst, size_t dstlen, const char *src) {
+	if (!dst || dstlen == 0)
+		return;
+	dst[0] = '\0';
+	if (!src)
+		return;
+	strncpy(dst, src, dstlen - 1);
+	dst[dstlen - 1] = '\0';
+}
+
+static void router_flow_meta(struct ndpi_detection_module_struct *mod,
+                             struct ndpi_flow_struct *flow,
+                             u_int16_t master, u_int16_t app,
+                             router_meta *out) {
+	if (!flow || !out)
+		return;
+	memset(out, 0, sizeof(*out));
+
+	router_copy_str(out->host, sizeof(out->host), ndpi_get_flow_name(&flow->core));
+
+	router_copy_str(out->confidence, sizeof(out->confidence),
+	                ndpi_confidence_get_name(flow->core.confidence));
+
+	out->risk_mask = (u_int64_t)flow->core.risk;
+
+	if (master == NDPI_PROTOCOL_TLS || master == NDPI_PROTOCOL_QUIC ||
+	    app == NDPI_PROTOCOL_TLS || app == NDPI_PROTOCOL_QUIC) {
+		struct ndpi_flow_tls_quic_metadata_struct *tls = &flow->metadata.protos.tls_quic;
+		router_copy_str(out->ja4, sizeof(out->ja4), tls->ja4_client);
+		router_copy_str(out->ja3s, sizeof(out->ja3s), tls->ja3_server);
+		router_copy_str(out->alpn, sizeof(out->alpn), tls->negotiated_alpn);
+		if (tls->ssl_version != 0) {
+			char vbuf[32];
+			char *vp = ndpi_ssl_version2str(vbuf, sizeof(vbuf), tls->ssl_version, NULL);
+			router_copy_str(out->tls_version, sizeof(out->tls_version), vp);
+		}
+	}
+	if (master == NDPI_PROTOCOL_DNS || app == NDPI_PROTOCOL_DNS) {
+		struct ndpi_flow_struct_dns_metadata *dns = &flow->metadata.protos.dns;
+		out->dns_qtype = dns->query_type;
+		out->dns_rcode = dns->reply_code;
+		out->dns_answers = dns->num_answers;
+	}
+	router_copy_str(out->http_url, sizeof(out->http_url), flow->metadata.http.url);
+	router_copy_str(out->http_ua, sizeof(out->http_ua), flow->metadata.http.user_agent);
+}
+
+static const char *router_risk_name(ndpi_risk_enum r) {
+	return ndpi_risk2str(r);
 }
 */
 import "C"
@@ -314,6 +381,18 @@ func (e *Engine) CategoryID(name string) (uint16, bool) {
 	return uint16(id), true
 }
 
+// CategoryNameByID returns the nDPI category name for id.
+func (e *Engine) CategoryNameByID(id uint16) string {
+	if e.mod == nil {
+		return ""
+	}
+	p := C.ndpi_category_get_name(e.mod, C.ndpi_protocol_category_t(id))
+	if p == nil {
+		return ""
+	}
+	return strings.TrimSpace(C.GoString(p))
+}
+
 // Protocols returns sorted unique protocol names (master/app ids) known to nDPI.
 func (e *Engine) Protocols() []string {
 	if e.mod == nil {
@@ -361,5 +440,137 @@ func (e *Engine) Categories() []string {
 		out = append(out, name)
 	}
 	sort.Strings(out)
+	return out
+}
+
+// TLSMeta holds TLS/QUIC fingerprint fields from nDPI.
+type TLSMeta struct {
+	Version string
+	JA4     string
+	JA3S    string
+	ALPN    string
+}
+
+// DNSMeta holds DNS query/response metadata.
+type DNSMeta struct {
+	QType   uint16
+	RCode   uint8
+	Answers uint8
+}
+
+// HTTPMeta holds HTTP fields when available.
+type HTTPMeta struct {
+	URL       string
+	UserAgent string
+}
+
+// Metadata is application-layer information extracted after classification.
+type Metadata struct {
+	Host       string
+	Confidence string
+	RiskMask   uint64
+	Risks      []string
+	TLS        TLSMeta
+	DNS        DNSMeta
+	HTTP       HTTPMeta
+}
+
+// Metadata reads nDPI flow fields. fs must still be allocated (before Free).
+func (e *Engine) Metadata(fs *FlowState, r Result) Metadata {
+	if e.mod == nil || fs == nil || fs.p == nil {
+		return Metadata{}
+	}
+	var cm C.router_meta
+	C.router_flow_meta(e.mod, fs.p, C.u_int16_t(r.Master), C.u_int16_t(r.App), &cm)
+	m := Metadata{
+		Host:       C.GoString(&cm.host[0]),
+		Confidence: C.GoString(&cm.confidence[0]),
+		RiskMask:   uint64(cm.risk_mask),
+		TLS: TLSMeta{
+			Version: C.GoString(&cm.tls_version[0]),
+			JA4:     C.GoString(&cm.ja4[0]),
+			JA3S:    C.GoString(&cm.ja3s[0]),
+			ALPN:    C.GoString(&cm.alpn[0]),
+		},
+		DNS: DNSMeta{
+			QType:   uint16(cm.dns_qtype),
+			RCode:   uint8(cm.dns_rcode),
+			Answers: uint8(cm.dns_answers),
+		},
+		HTTP: HTTPMeta{
+			URL:       C.GoString(&cm.http_url[0]),
+			UserAgent: C.GoString(&cm.http_ua[0]),
+		},
+	}
+	m.Risks = e.RiskNames(m.RiskMask)
+	return m
+}
+
+// RiskNames expands a risk bitmask to human-readable names.
+func (e *Engine) RiskNames(mask uint64) []string {
+	if e.mod == nil || mask == 0 {
+		return nil
+	}
+	var out []string
+	max := int(C.NDPI_MAX_RISK)
+	for i := 0; i < max; i++ {
+		bit := uint64(1) << uint(i)
+		if mask&bit == 0 {
+			continue
+		}
+		p := C.router_risk_name(C.ndpi_risk_enum(i))
+		if p == nil {
+			continue
+		}
+		name := strings.TrimSpace(C.GoString(p))
+		if name != "" {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+// Risks returns all known nDPI risk names (for policy editor).
+func (e *Engine) Risks() []string {
+	if e.mod == nil {
+		return nil
+	}
+	var out []string
+	max := int(C.NDPI_MAX_RISK)
+	for i := 0; i < max; i++ {
+		p := C.router_risk_name(C.ndpi_risk_enum(i))
+		if p == nil {
+			continue
+		}
+		name := strings.TrimSpace(C.GoString(p))
+		if name != "" && name != "No risk" {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+// FlowStructSize returns sizeof(ndpi_flow_struct) for memory estimates.
+func FlowStructSize() uint32 {
+	return uint32(C.ndpi_detection_get_sizeof_ndpi_flow_struct())
+}
+
+// Confidences returns nDPI confidence level names for policy validation.
+func (e *Engine) Confidences() []string {
+	if e.mod == nil {
+		return nil
+	}
+	var out []string
+	max := int(C.NDPI_CONFIDENCE_MAX)
+	for i := 0; i < max; i++ {
+		p := C.ndpi_confidence_get_name(C.ndpi_confidence_t(i))
+		if p == nil {
+			continue
+		}
+		name := strings.TrimSpace(C.GoString(p))
+		if name != "" {
+			out = append(out, name)
+		}
+	}
 	return out
 }
